@@ -7,7 +7,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: sonarqube-data-pvc
+  name: sonarqube-pvc
   namespace: devops
 spec:
   accessModes:
@@ -15,30 +15,12 @@ spec:
   resources:
     requests:
       storage: 10Gi
-  storageClassName: standard  # Ajout d'une classe de stockage
----
-# Volume séparé pour les extensions
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: sonarqube-extensions-pvc
-  namespace: devops
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
-  storageClassName: standard
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sonarqube
   namespace: devops
-  labels:
-    app: sonarqube
-    component: code-analysis
 spec:
   replicas: 1
   selector:
@@ -48,247 +30,49 @@ spec:
     metadata:
       labels:
         app: sonarqube
-        component: code-analysis
     spec:
       containers:
         - name: sonarqube
-          image: sonarqube:lts-community  # Version LTS recommandée
-          imagePullPolicy: IfNotPresent
+          image: sonarqube:lts-community
           ports:
             - containerPort: 9000
-              name: http
           env:
-            # Configuration de base
-            - name: SONAR_JDBC_URL
-              value: "jdbc:postgresql://postgresql:5432/sonarqube"  # PostgreSQL recommandé
-            - name: SONAR_JDBC_USERNAME
-              value: "sonar"
-            - name: SONAR_JDBC_PASSWORD
-              value: "sonar"
-            
-            # Optimisations
-            - name: SONAR_WEB_JAVAOPTS
-              value: "-Xmx512m -Xms128m -XX:+HeapDumpOnOutOfMemoryError"
-            - name: SONAR_CE_JAVAOPTS
-              value: "-Xmx512m -Xms128m"
-            - name: SONAR_SEARCH_JAVAOPTS
-              value: "-Xmx512m -Xms128m"
-            
-            # Désactivation checks Elasticsearch pour environnement Kubernetes
+            # Configuration minimale
             - name: SONAR_ES_BOOTSTRAP_CHECKS_DISABLE
               value: "true"
-            
-            # Sécurité
-            - name: SONAR_FORCEAUTHENTICATION
-              value: "true"
-            - name: SONAR_AUTHBITBUCKET_ENABLED
-              value: "false"
-            - name: SONAR_AUTHLDAP_ENABLED
-              value: "false"
-          
+            - name: SONAR_WEB_JAVAOPTS
+              value: "-Xmx512m -Xms128m"
           volumeMounts:
-            - name: sonarqube-data
+            - name: data
               mountPath: /opt/sonarqube/data
-              subPath: data
-            - name: sonarqube-extensions
-              mountPath: /opt/sonarqube/extensions
-              subPath: extensions
-            - name: sonarqube-logs
-              mountPath: /opt/sonarqube/logs
-          
-          # Sécurité Pod
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            runAsUser: 1000
-            capabilities:
-              drop:
-                - ALL
-          
           resources:
             requests:
-              memory: "2Gi"    # Augmenté pour stabilité
+              memory: "1Gi"
               cpu: "500m"
             limits:
-              memory: "4Gi"
-              cpu: "2000m"
-          
+              memory: "2Gi"
+              cpu: "1000m"
           readinessProbe:
             httpGet:
               path: /api/system/status
               port: 9000
-              scheme: HTTP
-            initialDelaySeconds: 120  # Augmenté pour démarrage lent
+            initialDelaySeconds: 120
             periodSeconds: 10
-            timeoutSeconds: 5
-            successThreshold: 1
-            failureThreshold: 10      # Augmenté pour tolérance
-            
-          livenessProbe:
-            httpGet:
-              path: /api/system/status
-              port: 9000
-              scheme: HTTP
-            initialDelaySeconds: 300  # Très long pour SonarQube
-            periodSeconds: 30
-            timeoutSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
-          
-          # Startup probe (Kubernetes 1.16+)
-          startupProbe:
-            httpGet:
-              path: /api/system/status
-              port: 9000
-            failureThreshold: 30      # 30 * 10s = 300s pour démarrer
-            periodSeconds: 10
-      
       volumes:
-        - name: sonarqube-data
+        - name: data
           persistentVolumeClaim:
-            claimName: sonarqube-data-pvc
-        - name: sonarqube-extensions
-          persistentVolumeClaim:
-            claimName: sonarqube-extensions-pvc
-        - name: sonarqube-logs
-          emptyDir: {}
-      
-      # Affinité Node (optionnel)
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              preference:
-                matchExpressions:
-                  - key: disktype
-                    operator: In
-                    values:
-                      - ssd
+            claimName: sonarqube-pvc
 ---
-# Service pour exposition interne
 apiVersion: v1
 kind: Service
 metadata:
   name: sonarqube-service
   namespace: devops
-  labels:
-    app: sonarqube
 spec:
-  type: ClusterIP  # NodePort changé pour ClusterIP (plus sécurisé)
+  type: NodePort
   selector:
     app: sonarqube
   ports:
-    - name: http
-      port: 9000
+    - port: 9000
       targetPort: 9000
-      protocol: TCP
----
-# Ingress pour exposition externe (optionnel)
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: sonarqube-ingress
-  namespace: devops
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: sonarqube.devops.local  # Modifier selon votre domaine
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: sonarqube-service
-                port:
-                  number: 9000
----
-# Déploiement PostgreSQL (optionnel mais recommandé)
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgresql-pvc
-  namespace: devops
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: standard
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: postgresql
-  namespace: devops
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: postgresql
-  template:
-    metadata:
-      labels:
-        app: postgresql
-    spec:
-      containers:
-        - name: postgresql
-          image: postgres:13-alpine
-          env:
-            - name: POSTGRES_DB
-              value: "sonarqube"
-            - name: POSTGRES_USER
-              value: "sonar"
-            - name: POSTGRES_PASSWORD
-              value: "sonar"
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
-          ports:
-            - containerPort: 5432
-          volumeMounts:
-            - name: postgresql-data
-              mountPath: /var/lib/postgresql/data
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "250m"
-            limits:
-              memory: "1Gi"
-              cpu: "1000m"
-          livenessProbe:
-            exec:
-              command:
-                - pg_isready
-                - -U
-                - sonar
-            initialDelaySeconds: 60
-            periodSeconds: 30
-          readinessProbe:
-            exec:
-              command:
-                - pg_isready
-                - -U
-                - sonar
-            initialDelaySeconds: 5
-            periodSeconds: 10
-      volumes:
-        - name: postgresql-data
-          persistentVolumeClaim:
-            claimName: postgresql-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgresql
-  namespace: devops
-spec:
-  type: ClusterIP
-  selector:
-    app: postgresql
-  ports:
-    - port: 5432
-      targetPort: 5432
+      nodePort: 30090
